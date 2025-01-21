@@ -1,80 +1,52 @@
-from gensim.models import KeyedVectors
-import numpy as np
-import preprocessingText as pt
-from tabulate import tabulate
-import database
-from sklearn.metrics import precision_score, recall_score
+import numpy as np  # Mengimpor pustaka NumPy untuk operasi numerik
+from gensim.models import KeyedVectors  # Mengimpor KeyedVectors dari Gensim untuk memuat model word vectors
+from preprocessingText import PreprocessingText  # Mengimpor kelas PreprocessingText untuk pemrosesan teks
+from database import DatabaseConnection  # Mengimpor kelas DatabaseConnection untuk koneksi database
 
-def main():
-    # Koneksi database
-    db = database.DatabaseConnection('root', 'medicine')
-    query = "SELECT Medicine_Name, Uses FROM medicine LIMIT 100"
-    data = db.select(query)
-    
-    # Memuat model word2vec yang telah dilatih
-    model_path = "model/GoogleNews-vectors-negative300-SLIM.bin.gz"
-    model = KeyedVectors.load_word2vec_format(model_path, binary=True)
 
-    # Pra-pemrosesan data
-    processed_data = [pt.preprocess(' '.join(row)) for row in data]
-    document_vectors = [np.mean([model[word] for word in doc if word in model], axis=0) for doc in processed_data]
+class Main:  # Mendefinisikan kelas utama
+    def __init__(self):  # Metode inisialisasi untuk kelas
+        self.db = DatabaseConnection('root', 'medicine')  # Membuat koneksi ke database
+        self.preprocessing = PreprocessingText()  # Membuat objek untuk pemrosesan teks
+        self.model = KeyedVectors.load_word2vec_format(  # Memuat model word vectors
+            "model/GoogleNews-vectors-negative300-SLIM.bin.gz", binary=True
+        )
 
-    # Masukan pengguna untuk kueri dan komputasi vektor yang sesuai
-    user_query = input("Enter your search query: ")
-    query_vector = pt.preprocess(user_query)
-    query_vector = np.mean([model[word] for word in query_vector if word in model], axis=0)
+    def run(self):  # Metode untuk menjalankan program
+        query = "SELECT Medicine_Name, Uses, Composition, Side_Effects FROM medicine LIMIT 100"  # Kueri untuk mengambil data obat
+        data = self.db.select(query)  # Menjalankan kueri dan mendapatkan data
+        
+        # Memproses data dengan menggabungkan nama dan penggunaan obat
+        processed_data = [self.preprocessing.preprocess(' '.join(row[:2])) for row in data]
+        document_vectors = [  # Menghitung vektor dokumen
+            np.mean([self.model[word] for word in doc if word in self.model], axis=0) 
+            for doc in processed_data
+        ]
 
-    # Menghitung kesamaan dan mengambil dokumen teratas
-    similarities = [np.dot(doc_vec, query_vector) / (np.linalg.norm(doc_vec) * np.linalg.norm(query_vector)) for doc_vec in document_vectors]
-    top_indices = np.argsort(similarities)[::-1][:10]
+        user_query = input("Enter your search query: ")  # Meminta input kueri dari pengguna
+        query_tokens = self.preprocessing.preprocess(user_query)  # Memproses kueri pengguna
+        expanded_query_tokens = self.preprocessing.expand_query(query_tokens)  # Memperluas kueri dengan sinonim
+        query_vector = np.mean(  # Menghitung vektor kueri
+            [self.model[word] for word in expanded_query_tokens if word in self.model], 
+            axis=0
+        )
 
-    # Menampilkan dokumen yang paling cocok beserta skornya
-    print("\nTop matching documents:")
-    headers = ["Medicine Name", "Composition", "Uses", "Side Effects", "Similarity Score"]
-    table_data = []
-    
-    predicted_labels = []  # Menyimpan prediksi (1 untuk relevan, 0 untuk tidak relevan)
-    ground_truth_labels = []  # Menyimpan label ground truth
-    
-    # Iterasi hasil prediksi dan simpan ke tabel relevance_labels
-    for index in top_indices:
-        full_details_query = "SELECT Medicine_Name, Composition, Uses, Side_effects FROM medicine WHERE Medicine_Name = %s"
-        full_details_data = db.select(full_details_query, (data[index][0],))
-        if full_details_data:
-            # Menambahkan skor kesamaan ke data tabel
-            row = list(full_details_data[0])  # Ubah tuple menjadi list untuk memodifikasi
-            row.append(f"{similarities[index]:.4f}")  # Format skor kesamaan dengan 4 angka desimal
-            table_data.append(row)
-            
-            # Evaluasi relevansi berdasarkan threshold
-            is_relevant = 1 if similarities[index] > 0.7 else 0  # Threshold relevansi
-            predicted_labels.append(is_relevant)  # Simpan prediksi relevansi
-            
-            # Asumsi ground truth dari threshold sementara
-            # Jika Anda memiliki tabel relevance_labels, ambil dari sana
-            ground_truth_labels.append(1 if similarities[index] > 0.5 else 0)  # Sesuaikan threshold
-            
-            # Simpan relevansi ke tabel relevance_labels
-            insert_query = """
-            INSERT INTO relevance_labels (Medicine_Name, Relevance)
-            VALUES (%s, %s)
-            ON DUPLICATE KEY UPDATE Relevance = VALUES(Relevance)
-            """
-            db.execute(insert_query, (data[index][0], is_relevant))
+        # Menghitung kesamaan antara vektor dokumen dan vektor kueri
+        similarities = [
+            np.dot(doc_vec, query_vector) / (np.linalg.norm(doc_vec) * np.linalg.norm(query_vector)) 
+            for doc_vec in document_vectors
+        ]
+        top_indices = np.argsort(similarities)[::-1][:10]  # Mengambil dokumen teratas berdasarkan kesamaan
+        # Menampilkan dokumen yang cocok
+        for index in top_indices:
+            print("-----------------")
+            print(f"Medicine Name : {data[index][0]}")
+            print(f"Uses : {data[index][1]}")
+            print(f"Composition : {data[index][2]}")
+            print(f"Side Effects : {data[index][3]}")
+            print(f"Similarity Score : {similarities[index]:.4f}")
 
-    # Tampilkan tabel dengan tabulate
-    print(tabulate(table_data, headers=headers, tablefmt="grid"))
-    
-    # Evaluasi model dengan precision dan recall
-    if predicted_labels and ground_truth_labels:
-        precision = precision_score(ground_truth_labels, predicted_labels)
-        recall = recall_score(ground_truth_labels, predicted_labels)
-        print("\nEvaluation Metrics:")
-        print(f"Precision: {precision:.4f}")
-        print(f"Recall: {recall:.4f}")
-    else:
-        print("\nEvaluation Metrics:")
-        print("Insufficient data for precision and recall calculation.")
+if __name__ == "__main__":  # Memastikan bahwa skrip dijalankan sebagai program utama
+    app = Main()  # Membuat objek dari kelas Main
+    app.run()  # Menjalankan program
 
-if __name__ == "__main__":
-    main()
